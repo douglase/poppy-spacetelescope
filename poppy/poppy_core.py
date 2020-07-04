@@ -7,6 +7,7 @@ import textwrap
 from abc import ABC, abstractmethod
 
 import numpy as np
+
 import matplotlib.pyplot as plt
 import scipy.ndimage.interpolation
 import matplotlib
@@ -3001,9 +3002,9 @@ class FITSOpticalElement(OpticalElement):
                         raise ValueError("You have asked for an implausibly large shift. Remember, "
                                          "shifts should be specified as decimal values between -0.5 and 0.5, "
                                          "a fraction of the total optic diameter. ")
-                    rolly = int(np.round(self.amplitude.shape[0] * shift[1]))   # remember Y,X order for shape,
+                    rolly = int(np.round_(self.amplitude.shape[0] * shift[1]))   # remember Y,X order for shape,
                                                                                 # but X,Y order for shift
-                    rollx = int(np.round(self.amplitude.shape[1] * shift[0]))
+                    rollx = int(np.round_(self.amplitude.shape[1] * shift[0]))
                     _log.info("Requested optic shift of ({:6.3f}, {:6.3f}) fraction of pupil ".format(*shift))
                     _log.info("Actual shift applied   = (%6.3f, %6.3f) " % (
                               rollx * 1.0 / self.amplitude.shape[1], rolly * 1.0 / self.amplitude.shape[0]))
@@ -3203,12 +3204,12 @@ class Detector(OpticalElement):
         if fov_pixels is None and fov_arcsec is None:
             raise ValueError("Either fov_pixels or fov_arcsec must be specified!")
         elif fov_pixels is not None:
-            self.fov_pixels = np.round(fov_pixels)
+            self.fov_pixels = np.round_(fov_pixels)
             self.fov_arcsec = self.fov_pixels * self.pixelscale
         else:
             # set field of view to closest value possible to requested,
             # consistent with having an integer number of pixels
-            self.fov_pixels = np.round((fov_arcsec.to(u.arcsec) / self.pixelscale).to(u.pixel))
+            self.fov_pixels = np.round_((fov_arcsec.to(u.arcsec) / self.pixelscale).to(u.pixel))
             self.fov_arcsec = self.fov_pixels * self.pixelscale
         if np.any(self.fov_pixels <= 0):
             raise ValueError("FOV in pixels must be a positive quantity. Invalid: " + str(self.fov_pixels))
@@ -3272,6 +3273,5 @@ class Detector(OpticalElement):
                              " must be a number (not '{2}'), and convertable to"
                              " units=arcsec/pixel or micron/pixel.".format('pixelscale',
                                                                            'Detector.__init__',
-                                                                           pixelscale))
-
+                                                                               pixelscale))
         return new_pixelscale

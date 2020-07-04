@@ -25,7 +25,6 @@ except ImportError:
 try:
     # try to import numexpr package to see if it is available
     import numexpr as ne
-
     _NUMEXPR_AVAILABLE = True
 except ImportError:
     ne = None
@@ -42,6 +41,16 @@ except ImportError:
     _CUDA_AVAILABLE = False
 
 try:
+    import cupy
+    import cupyx.scipy.fftpack as cupyfft
+    _CUPY_FFT_PLANS = {} # plans for various array sizes already prepared
+
+    _CUPY_AVAILABLE = True
+    _NUMEXPR_AVAILABLE = False #numexpr doesn't support cupy arrays
+except ImportError:
+    _CUPY_AVAILABLE = False
+
+try:
     # try to import OpenCL packages to see if they are is available
     import pyopencl
     import pyopencl.array
@@ -51,11 +60,11 @@ try:
 except ImportError:
     _OPENCL_AVAILABLE = False
 
-_USE_CUDA = (conf.use_cuda and _CUDA_AVAILABLE)
+_USE_CUDA = (conf.use_cuda and _CUDA_AVAILABLE and not _CUPY_AVAILABLE)
 _USE_OPENCL = (conf.use_opencl and _OPENCL_AVAILABLE)
 _USE_NUMEXPR = (conf.use_numexpr and _NUMEXPR_AVAILABLE)
 _USE_FFTW = (conf.use_fftw and _FFTW_AVAILABLE)
-
+_USE_CUPY = (True and _CUPY_AVAILABLE)
 
 def update_math_settings():
     """ Update the module-level math flags, based on user settings
@@ -190,6 +199,8 @@ def fft_2d(wavefront, forward=True, normalization=None, fftshift=True):
         method = 'pyculib (CUDA GPU)'
     elif _USE_OPENCL:
         method = 'pyopencl (OpenCL GPU)'
+    elif _USE_CUPY:
+        method = 'cupy (CUDA GPU)'
     elif _USE_FFTW:
         method = 'pyfftw'
     else:
@@ -221,6 +232,28 @@ def fft_2d(wavefront, forward=True, normalization=None, fftshift=True):
         else:
             cufftplan.inverse(wavefront, out=wavefront)
 
+    if _USE_CUPY:
+        if not isinstance(wavefront,cupy.ndarray):
+            wavefront=cupy.array(wavefront)
+            _log.warning('Casting wavefront to cupy array in FFT call')
+        if normalization is None:
+            normalization = 1./wavefront.shape[0]  # regardless of direction, for CUDA
+
+        # We need a CUPY FFT plan for each size and shape of FFT.
+        params = (wavefront.dtype,wavefront.shape)
+        try:
+            cufftplan = _CUPY_FFT_PLANS[params]
+        except KeyError:
+            cufftplan = cupyfft.get_fft_plan(wavefront)
+            _CUPY_FFT_PLANS[params] = cufftplan
+
+        # perform FFT on GPU, and return results in place to same array.
+        if forward:
+            #cupy uses this unusual overwrite_x syntax to perform in-place FFT
+            # and assignment is still required
+            wavefront = cupyfft.fftn(wavefront, overwrite_x=True,plan=cufftplan) 
+        else:
+            wavefront = cupyfft.ifftn(wavefront, overwrite_x=True,plan=cufftplan) 
     elif _USE_OPENCL:
         if normalization is None:
             normalization = 1./wavefront.shape[0] if forward else wavefront.shape[0]
