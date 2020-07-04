@@ -255,7 +255,7 @@ def display_psf(HDUlist_or_filename, ext=0, vmin=1e-7, vmax=1e-1,
                 orientation=colorbar_orientation
             )
         if scale.lower() == 'log':
-            ticks = np.logspace(np.log10(vmin), np.log10(vmax), np.log10(vmax / vmin) + 1)
+            ticks = np.logspace(np.log10(vmin), np.log10(vmax), int(np.round(np.log10(vmax / vmin) + 1)))
             if colorbar_orientation == 'horizontal' and vmax == 1e-1 and vmin == 1e-8:
                 ticks = [1e-8, 1e-6, 1e-4, 1e-2, 1e-1]  # looks better
             cb.set_ticks(ticks)
@@ -393,7 +393,7 @@ def display_psf_difference(hdulist_or_filename1=None, HDUlist_or_filename2=None,
 
     if colorbar:
         cb = plt.colorbar(ax.images[0], ax=ax, orientation=colorbar_orientation)
-        # ticks = np.logspace(np.log10(vmin), np.log10(vmax), np.log10(vmax/vmin)+1)
+        # ticks = np.logspace(np.log10(vmin), np.log10(vmax), int(np.round(np.log10(vmax/vmin)+1)))
         # if vmin == 1e-8 and vmax==1e-1:
         # ticks = [1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
         # ticks = [vmin, -0.5*vmax, 0, 0.5*vmax, vmax]
@@ -511,7 +511,7 @@ def display_profiles(HDUlist_or_filename=None, ext=0, overplot=False, title=None
 
 
 def radial_profile(hdulist_or_filename=None, ext=0, ee=False, center=None, stddev=False, binsize=None, maxradius=None,
-                   normalize='None', pa_range=None):
+                   normalize='None', pa_range=None, slice=0):
     """ Compute a radial profile of the image.
 
     This computes a discrete radial profile evaluated on the provided binsize. For a version
@@ -536,12 +536,15 @@ def radial_profile(hdulist_or_filename=None, ext=0, ee=False, center=None, stdde
         Compute standard deviation in each radial bin, not average?
     normalize : string
         set to 'peak' to normalize peak intensity =1, or to 'total' to normalize total flux=1.
-        Default is no normalization.
+        Default is no normalization (i.e. retain whatever normalization was used in computing the PSF itself)
     pa_range : list of floats, optional
         Optional specification for [min, max] position angles to be included in the radial profile.
         I.e. calculate that profile only for some wedge, not the full image. Specify the PA in degrees
         counterclockwise from +Y axis=0. Note that you can specify ranges across zero using negative numbers,
         such as pa_range=[-10,10].  The allowed PA range runs from -180 to 180 degrees.
+    slice: integer, optional
+        Slice into a datacube, for use on cubes computed by calc_datacube. Default 0 if a
+        cube is provided with no slice specified.
 
     Returns
     --------
@@ -558,7 +561,11 @@ def radial_profile(hdulist_or_filename=None, ext=0, ee=False, center=None, stdde
     else:
         raise ValueError("input must be a filename or HDUlist")
 
-    image = hdu_list[ext].data.copy()  # don't change normalization of actual input array, work with a copy!
+    if hdu_list[ext].header['NAXIS']==3:
+        # data cube, so pick out just one slice
+        image = hdu_list[ext].data[slice].copy()  # don't change normalization of actual input array, work with a copy!
+    else:
+        image = hdu_list[ext].data.copy()  # don't change normalization of actual input array, work with a copy!
 
     if normalize.lower() == 'peak':
         _log.debug("Calculating profile with PSF normalized to peak = 1")
@@ -569,8 +576,6 @@ def radial_profile(hdulist_or_filename=None, ext=0, ee=False, center=None, stdde
 
     pixelscale = hdu_list[ext].header['PIXELSCL']
 
-    if maxradius is not None:
-        raise NotImplemented("add max radius")
 
     if binsize is None:
         binsize = pixelscale
@@ -624,6 +629,12 @@ def radial_profile(hdulist_or_filename=None, ext=0, ee=False, center=None, stdde
         # more than a pixel from the center. Therefore we have to include that offset here
         rr += binsize * np.floor(sr[0])
 
+
+    if maxradius is not None:
+        crop = rr < maxradius
+        rr = rr[crop]
+        radialprofile2 = radialprofile2[crop]
+
     if stddev:
         stddevs = np.zeros_like(radialprofile2)
         r_pix = r * binsize
@@ -648,7 +659,7 @@ def radial_profile(hdulist_or_filename=None, ext=0, ee=False, center=None, stdde
 #    PSF evaluation functions
 #
 
-def measure_ee(HDUlist_or_filename=None, ext=0, center=None, binsize=None):
+def measure_ee(HDUlist_or_filename=None, ext=0, center=None, binsize=None, normalize='None'):
     """ measure encircled energy vs radius and return as an interpolator
 
     Returns a function object which when called returns the Encircled Energy inside a given radius,
@@ -666,6 +677,9 @@ def measure_ee(HDUlist_or_filename=None, ext=0, center=None, binsize=None):
         Coordinates (x,y) of PSF center. Default is image center.
     binsize:
         size of step for profile. Default is pixel size.
+   normalize : string
+        set to 'peak' to normalize peak intensity =1, or to 'total' to normalize total flux=1.
+        Default is no normalization (i.e. retain whatever normalization was used in computing the PSF itself)
 
     Returns
     --------
@@ -680,7 +694,8 @@ def measure_ee(HDUlist_or_filename=None, ext=0, center=None, binsize=None):
 
     """
 
-    rr, radialprofile2, ee = radial_profile(HDUlist_or_filename, ext, ee=True, center=center, binsize=binsize)
+    rr, radialprofile2, ee = radial_profile(HDUlist_or_filename, ext, ee=True, center=center, binsize=binsize,
+                                            normalize=normalize)
 
     # append the zero at the center
     rr_ee = rr + (rr[1] - rr[0]) / 2.0  # add half a binsize to this, because the ee is measured inside the
@@ -693,7 +708,7 @@ def measure_ee(HDUlist_or_filename=None, ext=0, center=None, binsize=None):
     return ee_fn
 
 
-def measure_radius_at_ee(HDUlist_or_filename=None, ext=0, center=None, binsize=None):
+def measure_radius_at_ee(HDUlist_or_filename=None, ext=0, center=None, binsize=None, normalize='None'):
     """ measure encircled energy vs radius and return as an interpolator
     Returns a function object which when called returns the radius for a given Encircled Energy. This is the
     inverse function of measure_ee
@@ -708,6 +723,9 @@ def measure_radius_at_ee(HDUlist_or_filename=None, ext=0, center=None, binsize=N
         Coordinates (x,y) of PSF center. Default is image center.
     binsize:
         size of step for profile. Default is pixel size.
+    normalize : string
+        set to 'peak' to normalize peak intensity =1, or to 'total' to normalize total flux=1.
+        Default is no normalization (i.e. retain whatever normalization was used in computing the PSF itself)
 
     Returns
     --------
@@ -720,7 +738,8 @@ def measure_radius_at_ee(HDUlist_or_filename=None, ext=0, center=None, binsize=N
     >>> print "The EE is 50% at {} arcsec".format(ee(0.5))
     """
 
-    rr, radialprofile2, ee = radial_profile(HDUlist_or_filename, ext, ee=True, center=center, binsize=binsize)
+    rr, radialprofile2, ee = radial_profile(HDUlist_or_filename, ext, ee=True, center=center, binsize=binsize,
+                                            normalize=normalize)
 
     # append the zero at the center
     rr_ee = rr + (rr[1] - rr[0]) / 2.0  # add half a binsize to this, because the EE is measured inside the
@@ -810,7 +829,7 @@ def measure_fwhm(HDUlist_or_filename, ext=0, center=None, plot=False, threshold=
         raise ValueError("input must be a filename or HDUlist")
 
     image = HDUlist[ext].data.copy()  # don't change normalization of actual input array; work with a copy
-    image /= image.max()  # Normalize the copy to peak=1
+    image = image/image.max()  # Normalize the copy to peak=1
 
     pixelscale = HDUlist[ext].header['PIXELSCL']
 
@@ -1315,17 +1334,11 @@ class BackCompatibleQuantityInput(object):
 
     def __call__(self, wrapped_function):
         from astropy.utils.decorators import wraps
-
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            from astropy.utils.compat import funcsigs
-            # TODO update this code to avoid the deprecated function, once
-            # we are running in only-python-3 mode
         from astropy.units import UnitsError, add_enabled_equivalencies, Quantity
+        import inspect
 
         # Extract the function signature for the function we are wrapping.
-        wrapped_signature = funcsigs.signature(wrapped_function)
+        wrapped_signature = inspect.signature(wrapped_function)
 
         # Define a new function to return in place of the wrapped one
         @wraps(wrapped_function)
@@ -1336,8 +1349,8 @@ class BackCompatibleQuantityInput(object):
             # Iterate through the parameters of the original signature
             for param in wrapped_signature.parameters.values():
                 # We do not support variable arguments (*args, **kwargs)
-                if param.kind in (funcsigs.Parameter.VAR_KEYWORD,
-                                  funcsigs.Parameter.VAR_POSITIONAL):
+                if param.kind in (inspect.Parameter.VAR_KEYWORD,
+                                  inspect.Parameter.VAR_POSITIONAL):
                     continue
                 # Catch the (never triggered) case where bind relied on a default value.
                 if param.name not in bound_args.arguments and param.default is not param.empty:
@@ -1357,7 +1370,7 @@ class BackCompatibleQuantityInput(object):
 
                 # If the target unit is empty, then no unit was specified so we
                 # move past it
-                if target_unit is not funcsigs.Parameter.empty:
+                if target_unit is not inspect.Parameter.empty:
                     if not isinstance(arg, Quantity):
                         # if we're going to make something a quantity it had better
                         # be compatible with float ndarray

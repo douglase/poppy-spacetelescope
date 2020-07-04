@@ -30,19 +30,24 @@ list of contributors.
 Direct contributors to POPPY code
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
- * Marshall Perrin (@mperrin)
- * Joseph Long (@josephoenix)
- * Ewan Douglas (@douglase)
- * Shannon Osborne (@shanosborne)
- * Neil Zimmerman (@neilzim)
- * Anand Sivaramakrishnan (@anand0xff)
- * Maciek Grochowicz (@maciekgroch)
- * Phillip Springer (@daphil)
- * Ted Corcovilos (@corcoted)
- * Kyle Douglass (@kmdouglas)
- * Christine Slocum (@cslocum)
- * Matt Mechtley (@mmechtley)
- * Scott Will (@sdwill)
+ * Marshall Perrin (:user:`mperrin`)
+ * Joseph Long (:user:`josephoenix`)
+ * Ewan Douglas (:user:`douglase`)
+ * Shannon Osborne (:user:`shanosborne`)
+ * Neil Zimmerman (:user:`neilzim`)
+ * Anand Sivaramakrishnan (:user:`anand0xff`)
+ * Maciek Grochowicz (:user:`maciekgroch`)
+ * Phillip Springer (:user:`daphil`)
+ * Ted Corcovilos (:user:`corcoted`)
+ * Kyle Douglass (:user:`kmdouglas`)
+ * Christine Slocum (:user:`cslocum`)
+ * Matt Mechtley (:user:`mmechtley`)
+ * Scott Will (:user:`sdwill`)
+ * Iva Laginja (:user:`ivalaginja`)
+ * Mike Fitzgerald (:user:`astrofitz`)
+ * Keira Brooks (:user:`kjbrooks`)
+ * Justin Otor (:user:`ojustino`)
+ * Rachel Morgan (:user:`remorgan01`)
 
 Indirect Contributors (algorithms, advice, ideas, inspirations)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -70,8 +75,8 @@ Contributors via Astropy Affiliated Package Template
  * Brigitta Sipocz
 
 
-This work was supported in part by the JWST mission, a joint effort of NASA,
-ESA, and CSA, and by the WFIRST Phase-A mission development project. STScI
+This work has been supported in part by the JWST mission, a joint effort of NASA,
+ESA, and CSA, and by the Nancy Grace Roman Space Telescope (formerly WFIRST) mission development project. STScI
 is operated on behalf of NASA by the Association of Universities for Research
 in Astronomy.
 

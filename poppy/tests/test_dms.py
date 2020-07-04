@@ -41,6 +41,37 @@ def test_basic_continuous_dm():
     return psf_aberrated, psf_perf, osys
 
 
+def test_cont_dm_flips(display=False):
+    """ Test that we can flip a deformable mirror in X or Y
+    """
+
+    testdm1 = dms.ContinuousDeformableMirror(dm_shape=(5,5))
+    testdm2 = dms.ContinuousDeformableMirror(dm_shape=(5,5), flip_x=True)
+    testdm3 = dms.ContinuousDeformableMirror(dm_shape=(5,5), flip_y=True)
+
+    for t in [testdm1, testdm2, testdm3]:
+        t.set_actuator(0,2, 1e-6)
+        t.set_actuator(1,1, -0.5e-6)
+
+    w = poppy_core.Wavefront(npix=5)
+
+    if display:
+        import matplotlib.pyplot as plt
+        testdm1.display(what='both', npix=5)
+        testdm2.set_actuator(0,2, 1e-6)
+        plt.figure()
+        testdm2.display(what='both', npix=5)
+        plt.figure()
+        testdm3.display(what='both', npix=5)
+
+    opd_1 = testdm1.get_opd(w)
+    opd_2 = testdm2.get_opd(w)
+    opd_3 = testdm3.get_opd(w)
+
+    assert np.allclose(opd_1, opd_2[:, ::-1]), 'Problem with flip_x'
+    assert np.allclose(opd_1, opd_3[::-1]), 'Problem with flip_y'
+
+
 def test_basic_hex_dm():
     """ A simple test for the hex segmented deformable mirror code -
     can we move actuators, and does adding nonzero WFE result in decreased Strehl?"""
@@ -77,3 +108,30 @@ def test_basic_hex_dm():
 
     return psf_aberrated, psf_perf, osys
 
+
+def test_hex_dm_rotation(npix=128, ptt = (0, 1e-6, 0), plot=False):
+    """
+    Verify the hexagonally segmented DM can be rotated without introducing unexpected errors in the
+    OPD models. Verify rotating the DM also rotates the OPD accordingly, and does not change its values.
+
+	npix : number of pixels for test OPD evaluation
+	ptt : piston, tip, tilt for segment move for use in test OPD evaluation
+    plot : make optional plots
+    """
+    dm = dms.HexSegmentedDeformableMirror(rings=2, rotation=0)
+    dm.set_actuator(1, *ptt )
+
+    ref_opd = dm.sample(what='opd', npix=npix)
+
+    for rot in [90, -90, 180]:
+        dm = dms.HexSegmentedDeformableMirror(rings=2, rotation=rot)
+        dm.set_actuator(1, *ptt )
+        opd = dm.sample(what='opd', npix=npix)
+
+        assert np.allclose(opd.max(), ref_opd.max()), f"OPD max pixel changed unexpectedly for rotation = {rot}"
+        nrotations = rot//90
+        assert np.allclose(np.rot90(opd, k=nrotations), ref_opd), f"OPD rotation not as expected for rotation = {rot}, k={nrotations}"
+
+        if plot:
+            plt.figure()
+            dm.display(what='opd', npix=npix, opd_vmax=1e-6, title=f'DM with {rot} rotation', colorbar_orientation='vertical')

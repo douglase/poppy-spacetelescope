@@ -22,6 +22,7 @@ except ImportError:
 from . import poppy_core
 from . import optics
 from . import utils
+from . import conf
 
 import logging
 
@@ -309,9 +310,16 @@ class Instrument(object):
             you would supply in a call to calc_psf via the "monochromatic" option
         """
 
+        # Allow up to 10,000 wavelength slices. The number matters because FITS
+        # header keys can only have up to 8 characters. Backward-compatible.
         nwavelengths = len(wavelengths)
-        if nwavelengths > 100:
-            raise ValueError("Maximum number of wavelengths exceeded. Cannot be more than 100.")
+        if nwavelengths < 100:
+            label_wl = lambda i: 'WAVELN{:02d}'.format(i)
+        elif nwavelengths < 10000:
+            label_wl = lambda i: 'WVLN{:04d}'.format(i)
+        else:
+            raise ValueError("Maximum number of wavelengths exceeded. "
+                             "Cannot be more than 10,000.")
 
         # Set up cube and initialize structure based on PSF at first wavelength
         poppy_core._log.info("Starting multiwavelength data cube calculation.")
@@ -321,7 +329,7 @@ class Instrument(object):
         for ext in range(len(psf)):
             cube[ext].data = np.zeros((nwavelengths, psf[ext].data.shape[0], psf[ext].data.shape[1]))
             cube[ext].data[0] = psf[ext].data
-            cube[ext].header['WAVELN00'] = wavelengths[0]
+            cube[ext].header[label_wl(0)] = wavelengths[0]
 
         # iterate rest of wavelengths
         for i in range(1, nwavelengths):
@@ -329,7 +337,7 @@ class Instrument(object):
             psf = self.calc_psf(*args, monochromatic=wl, **kwargs)
             for ext in range(len(psf)):
                 cube[ext].data[i] = psf[ext].data
-                cube[ext].header['WAVELN{:02d}'.format(i)] = wl
+                cube[ext].header[label_wl(i)] = wl
                 cube[ext].header.add_history("--- Cube Plane {} ---".format(i))
                 for h in psf[ext].header['HISTORY']:
                     cube[ext].header.add_history(h)
@@ -436,15 +444,30 @@ class Instrument(object):
 
         if self.pupilopd is None:
             opdstring = "NONE - perfect telescope! "
+            opdfile = 'None'
+            opdslice = 0
         elif isinstance(self.pupilopd, str):
             opdstring = os.path.basename(self.pupilopd)
+            opdfile = os.path.basename(self.pupilopd)
+            opdslice = 0  # default slice
         elif isinstance(self.pupilopd, fits.HDUList):
             opdstring = 'OPD from supplied FITS HDUlist object'
+            if isinstance(self.pupilopd.filename(), str):
+                opdfile = os.path.basename(self.pupilopd.filename())
+            else:
+                opdfile = 'None'
+            opdslice = 0
         elif isinstance(self.pupilopd, poppy_core.OpticalElement):
             opdstring = 'OPD from supplied OpticalElement: ' + str(self.pupilopd)
+            opdfile = str(self.pupilopd)
+            opdslice = 0
         else:  # tuple?
             opdstring = "%s slice %d" % (os.path.basename(self.pupilopd[0]), self.pupilopd[1])
+            opdfile = os.path.basename(self.pupilopd[0])
+            opdslice = self.pupilopd[1]
         result[0].header['PUPILOPD'] = (opdstring, 'Pupil OPD source')
+        result[0].header['OPD_FILE'] = (opdfile, 'Pupil OPD file name')
+        result[0].header['OPDSLICE'] = (opdslice, 'Pupil OPD slice number, if file is a datacube')
 
         result[0].header['INSTRUME'] = (self.name, 'Instrument')
         result[0].header['FILTER'] = (self.filter, 'Filter name')
@@ -592,6 +615,14 @@ class Instrument(object):
 
         return optsys
 
+    def get_optical_system(self, *args, **kwargs):
+        """ Return an OpticalSystem instance corresponding to the instrument as currently configured.
+
+        """
+        # Note, this has historically been an internal private API function (starting with an underscore)
+        # As of version 0.9 it is promoted to a public part of the API for the Instrument class and subclasses.
+        return self._get_optical_system(*args, **kwargs)
+
     def _check_for_aliasing(self, wavelengths):
         """ Check for spatial frequency aliasing and warn if the
         user is requesting a FOV which is larger than supported based on
@@ -671,7 +702,10 @@ class Instrument(object):
         if local_options is None:
             local_options = self.options
         if 'jitter' not in local_options:
+            result[0].header['JITRTYPE'] = ('None', 'Type of jitter applied')
             return
+
+        if conf.enable_speed_tests: t0 = time.time()
 
         poppy_core._log.info("Calculating jitter using " + str(local_options['jitter']))
 
@@ -697,12 +731,17 @@ class Instrument(object):
 
             poppy_core._log.info("        resulting image peak drops to {0:.3f} of its previous value".format(strehl))
             result[0].header['JITRTYPE'] = ('Gaussian convolution', 'Type of jitter applied')
-            result[0].header['JITRSIGM'] = (sigma, 'Gaussian sigma for jitter [arcsec]')
+            result[0].header['JITRSIGM'] = (sigma, 'Gaussian sigma for jitter, per axis [arcsec]')
             result[0].header['JITRSTRL'] = (strehl, 'Strehl reduction from jitter ')
 
             result[0].data = out
         else:
             raise ValueError('Unknown jitter option value: ' + local_options['jitter'])
+
+        if conf.enable_speed_tests:
+            t1 = time.time()
+            _log.debug("\tTIME %f s\t for jitter model" % (t1 - t0))
+
 
     #####################################################
     # Display routines

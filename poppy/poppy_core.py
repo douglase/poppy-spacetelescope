@@ -156,6 +156,8 @@ class BaseWavefront(ABC):
         sqrt_ti = np.sqrt(self.total_intensity)
         if sqrt_ti == 0:
             _log.warning("Total intensity is zero when trying to normalize the wavefront. Cannot normalize.")
+        elif not np.isfinite(sqrt_ti):
+            _log.warning("Total intensity is NaN or Inf when trying to normalize the wavefront. Cannot normalize.")
         else:
             self.wavefront /= sqrt_ti
 
@@ -199,11 +201,22 @@ class BaseWavefront(ABC):
 
     def __iadd__(self, wave):
         """Add another wavefront to this one"""
-        if not isinstance(wave, BaseWavefront):
-            raise ValueError('Wavefronts can only be summed with other Wavefronts')
+        if not isinstance(wave, self.__class__):
+            raise ValueError('Wavefronts can only be summed with other Wavefronts of the same class.')
 
-        if not self.wavefront.shape[0] == wave.wavefront.shape[0]:
-            raise ValueError('Wavefronts can only be added if they have the same size and shape')
+        if not self.wavefront.shape == wave.wavefront.shape:
+            raise ValueError('Wavefronts can only be added if they have the same size and shape: {} vs {} '.format(
+                self.wavefront.shape, wave.wavefront.shape))
+
+
+        try:
+            if not np.isclose(self.pixelscale.value, wave.pixelscale.to(self.pixelscale.unit).value):
+                raise ValueError('Wavefronts can only be added if they have the same pixelscale: {} vs {}'.format(
+                    self.pixelscale, wave.pixelscale))
+        except u.UnitConversionError:
+            raise ValueError('Wavefronts can only be added if they have equivalent units: {} vs {}'.format(
+                self.pixelscale.unit, wave.pixelscale.unit))
+
 
         self.wavefront += wave.wavefront
         self.history.append("Summed with another wavefront!")
@@ -439,16 +452,10 @@ class BaseWavefront(ABC):
 
         # prepare color maps and normalizations for intensity and phase
         if vmax is None:
-            if what == 'phase':
-                vmax = 0.25
-            else:
-                vmax = intens.max()
+            vmax = 0.25 if what == 'phase' else intens.max()
         if scale == 'linear':
             if vmin is None:
-                if what == 'phase':
-                    vmin = -0.25
-                else:
-                    vmin = 0
+                vmin = 0.25 if what == 'phase' else 0
             norm_inten = matplotlib.colors.Normalize(vmin=vmin, vmax=vmax)
             cmap_inten = getattr(matplotlib.cm, conf.cmap_pupil_intensity)
             cmap_inten.set_bad('0.0')
@@ -460,7 +467,11 @@ class BaseWavefront(ABC):
             cmap_inten.set_bad(cmap_inten(0))
         cmap_phase = getattr(matplotlib.cm, conf.cmap_diverging)
         cmap_phase.set_bad('0.3')
-        norm_phase = matplotlib.colors.Normalize(vmin=vmin, vmax=vmax)
+        # note, can't currently set separate vmin and vmax for intensity and phase
+        # but we can apply here a prior that the phase is always in the range of
+        # -pi to +pi, and we should display with a balanced color scale.
+        vmx = np.clip(max(vmax, np.abs(vmin)), -np.pi, np.pi)
+        norm_phase = matplotlib.colors.Normalize(vmin=-vmx, vmax=vmx)
 
         def wrap_lines_title(title):
             # Helper fn to add line breaks in plot titles,
@@ -497,7 +508,7 @@ class BaseWavefront(ABC):
             if ax is None:
                 ax = plt.subplot(nr, nc, int(row))
             utils.imshow_with_mouseover(
-                phase / (np.pi * 2),
+                phase,
                 ax=ax,
                 extent=extent,
                 norm=norm_phase,
@@ -1028,13 +1039,15 @@ class Wavefront(BaseWavefront):
         det_calc_size_pixels = det.fov_pixels.to(u.pixel).value * det.oversample
 
         mft = MatrixFourierTransform(centering='ADJUSTABLE', verbose=False)
+
+        pixelscale = det.pixelscale if det.pixelscale is not None else det.fov_arcsec/det.fov_pixels
         if not np.isscalar(det_fov_lam_d):  # hasattr(det_fov_lam_d,'__len__'):
             msg = '    Propagating w/ MFT: {:.4f}     fov=[{:.3f},{:.3f}] lam/D    npix={} x {}'.format(
-                det.pixelscale / det.oversample, det_fov_lam_d[0], det_fov_lam_d[1],
+                pixelscale / det.oversample, det_fov_lam_d[0], det_fov_lam_d[1],
                 det_calc_size_pixels[0], det_calc_size_pixels[1])
         else:
             msg = '    Propagating w/ MFT: {:.4f}     fov={:.3f} lam/D    npix={:d}'.format(
-                det.pixelscale / det.oversample, det_fov_lam_d, int(det_calc_size_pixels))
+                pixelscale / det.oversample, det_fov_lam_d, int(det_calc_size_pixels))
         _log.debug(msg)
         self.history.append(msg)
         det_offset = det.det_offset if hasattr(det, 'det_offset') else (0, 0)
@@ -1145,10 +1158,14 @@ class Wavefront(BaseWavefront):
         else:
             pixel_scale_x, pixel_scale_y = pixelscale_mpix, pixelscale_mpix
 
-        y -= (shape[0] - 1) / 2.0
-        x -= (shape[1] - 1) / 2.0
-
-        return pixel_scale_y * y, pixel_scale_x * x
+        if accel_math._USE_NUMEXPR:
+            ny, nx = shape
+            return (ne.evaluate("pixel_scale_y * (y - (ny-1)/2)"),
+                    ne.evaluate("pixel_scale_x * (x - (nx-1)/2)") )
+        else:
+            y -= (shape[0] - 1) / 2.0
+            x -= (shape[1] - 1) / 2.0
+            return pixel_scale_y * y, pixel_scale_x * x
 
     @staticmethod
     def image_coordinates(shape, pixelscale, last_transform_type, image_centered):
@@ -1435,6 +1452,9 @@ class BaseOpticalSystem(ABC):
             What to save - phase, intensity, amplitude, complex, parts, all. Default is all.
         return_intermediates: bool, optional
             return intermediate wavefronts as well as PSF?
+        return_final: bool, optional
+            return the complex wavefront at the last surface propagation as well as the PSF.
+            Useful for getting complex PSF without memory usage of `return_intermediates`
         source : dict
             a dict containing 'wavelengths' and 'weights' list.
         normalize : string, optional
@@ -1453,6 +1473,9 @@ class BaseOpticalSystem(ABC):
             Only returned if `return_intermediates` is specified.
             A list of `poppy.Wavefront` objects representing the wavefront at intermediate optical planes.
             The 0th item is "before first optical plane", 1st is "after first plane and before second plane", and so on.
+        final_wfs : `poppy.Wavefront` object (optional)
+            Only returned if `return_final` is specified.
+           `poppy.Wavefront` objects representing the wavefront at the last of the optical planes.
         """
 
         tstart = time.time()
@@ -2386,7 +2409,9 @@ class OpticalElement(object):
 
     @utils.quantity_input(opd_vmax=u.meter, wavelength=u.meter)
     def display(self, nrows=1, row=1, what='intensity', crosshairs=False, ax=None, colorbar=True,
-                colorbar_orientation=None, title=None, opd_vmax=0.5e-6 * u.meter, wavelength=1e-6 * u.meter):
+                colorbar_orientation=None, title=None, opd_vmax=0.5e-6 * u.meter,
+                wavelength=1e-6 * u.meter,
+                npix=512, grid_size=None):
         """Display plots showing an optic's transmission and OPD.
 
         Parameters
@@ -2412,6 +2437,15 @@ class OpticalElement(object):
         wavelength : float, default 1 micron
             For optics with wavelength-dependent behavior, evaluate at this
             wavelength for display.
+        npix : integer
+            For optics without a fixed pixel sampling, evaluate onto this many
+            pixels for display.
+        grid_size : float
+            For optics without a fixed pixel sampling, evaluate onto this large
+            a spatial or angular extent for display. Specify in units of
+            arcsec for image plane optics, meters for all other optics.
+            If unspecified, a default value will be chosen instead, possibly
+            from the ._default_display_size attribute, if present.
         """
         if colorbar_orientation is None:
             colorbar_orientation = "horizontal" if nrows == 1 else 'vertical'
@@ -2437,103 +2471,135 @@ class OpticalElement(object):
             if len(units) > 20:
                 units = "\n".join(textwrap.wrap(units, 20))
 
+        ## Create a wavefront object to use when evaluating/sampling the optic.
         if self.pixelscale is not None:
-            if self.pixelscale.decompose().unit == u.m / u.pix:
-                halfsize = self.pixelscale.to(u.m / u.pix).value * self.amplitude.shape[0] / 2
-            elif self.pixelscale.decompose().unit == u.radian / u.pix:
-                halfsize = self.pixelscale.to(u.arcsec / u.pix).value * self.amplitude.shape[0] / 2
-            else:
-                halfsize = self.pixelscale.value * self.amplitude.shape[0] / 2
-                _log.warning("Using pixelscale value without conversion, units not recognized.")
-            _log.debug("Display pixel scale = {} ".format(self.pixelscale))
+            # This optic has an inherent sampling.  The display wavefront's sampling is
+            # irrelevant; we get the native pixel scale opd and amplitude regardless and
+            # display that.
+            temp_wavefront = Wavefront(wavelength, npix=2)
+            disp_pixelscale = self.pixelscale
+            disp_shape = self.shape
         else:
-            # TODO not sure this code path ever gets used - since pixelscale is set temporarily
-            # in AnalyticOptic.display
-            _log.debug("No defined pixel scale - this must be an analytic optic")
-            halfsize = 1.0
+            # this optic does not have an inherent sampling. Set up the display wavefront based on
+            # the parameters to this function call, and/or object attributes for defaults.
+            # The syntax for how to do that depends on image plane vs other kinds of planes.
+            # This code is partially duplicative of AnalyticOpticalElement.sample()
+            if self.planetype == PlaneType.image:
+                if grid_size is not None:
+                    fov = grid_size if isinstance(grid_size, u.Quantity) else grid_size * u.arcsec
+                elif hasattr(self, '_default_display_size'):
+                    fov = self._default_display_size
+                else:
+                    fov = 4 * u.arcsec
+                pixel_scale = fov / (npix * u.pixel)
+                temp_wavefront = Wavefront(wavelength=wavelength, npix=npix, pixelscale=pixel_scale)
+            else:
+                if grid_size is not None:
+                    diam = grid_size if isinstance(grid_size, u.Quantity) else grid_size * u.meter
+                elif hasattr(self, '_default_display_size'):
+                    diam = self._default_display_size
+                elif hasattr(self, 'pupil_diam'):
+                    diam = self.pupil_diam * 1
+                else:
+                    diam = 1.0 * u.meter
+                temp_wavefront = Wavefront(wavelength=wavelength, npix=npix, diam=diam)
+            _log.info("Computing {0} for {1} sampled onto {2} pixel grid with "
+                      "pixelscale {3}".format(what, self.name, npix, temp_wavefront.pixelscale))
+
+            disp_pixelscale = temp_wavefront.pixelscale
+            disp_shape = temp_wavefront.shape
+
+        ## Determine the extent of the image in physical units, for axes labels.
+        _log.debug("Display pixel scale = {} ".format(disp_pixelscale))
+        if disp_pixelscale.decompose().unit == u.m / u.pix:
+            halfsize = disp_pixelscale.to(u.m / u.pix).value * disp_shape[0] / 2
+        elif disp_pixelscale.decompose().unit == u.radian / u.pix:
+            halfsize = disp_pixelscale.to(u.arcsec / u.pix).value * disp_shape[0] / 2
+        else:
+            raise RuntimeError("Pixelscale units not recognized in display; "
+                              "must be equivalent to arcsec/pix or m/pix")
         extent = [-halfsize, halfsize, -halfsize, halfsize]
 
-        temp_wavefront = Wavefront(wavelength)
+        # Evaluate the wavefront at the desired sampling and pixel scale.
         ampl = self.get_transmission(temp_wavefront)
-        opd = self.get_opd(temp_wavefront)
+        opd = self.get_opd(temp_wavefront).copy()
         opd[np.where(ampl == 0)] = np.nan
 
+        # define a helper function for the actual plotting - we do it this way so
+        # we can call it twice if the 'both' option is chosen. This avoids the complexities of the
+        # earlier version of this function which called itself recursively to show both.
+        def optic_display_helper(plot_array, ax, title, is_opd=False):
+            if is_opd:
+                cmap = cmap_opd
+                norm = norm_opd
+                cb_values = np.array([-1, -0.5, 0, 0.5, 1]) * opd_vmax_m
+                cb_label = 'meters'
+            else:
+                cmap = cmap_amp
+                norm = norm_amp
+                cb_values = [0, 0.25, 0.5, 0.75, 1.0]
+                cb_label = 'Fraction'
+
+            utils.imshow_with_mouseover(plot_array, ax=ax, extent=extent, cmap=cmap, norm=norm,
+                                    origin='lower')
+
+            plt.title(title)
+            plt.ylabel(units)
+            ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=4, integer=True))
+            ax.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=4, integer=True))
+            if colorbar:
+                cb = plt.colorbar(ax.images[0], orientation=colorbar_orientation, ticks=cb_values)
+                cb.set_label(cb_label)
+            if crosshairs:
+                ax.axhline(0, ls=":", color='k')
+                ax.axvline(0, ls=":", color='k')
+
+            if hasattr(self, 'display_annotate'):
+                self.display_annotate(self, ax)  # atypical calling convention needed empirically
+                # since Python doesn't seem to automatically pass
+                # self as first argument for functions added at
+                # run time as attributes?
+
         if what == 'both':
-            # recursion!
-            if ax is None:
-                ax = plt.subplot(nrows, 2, row * 2 - 1)
-            self.display(what='intensity', ax=ax, crosshairs=crosshairs, colorbar=colorbar,
-                         colorbar_orientation=colorbar_orientation, title=None, opd_vmax=opd_vmax,
-                         nrows=nrows)
+            ax1 = plt.subplot(nrows, 2, row * 2 - 1)
+            optic_display_helper(ampl**2, ax1, 'Transmittance for '+self.name, False)
+
             ax2 = plt.subplot(nrows, 2, row * 2)
-            self.display(what='opd', ax=ax2, crosshairs=crosshairs, colorbar=colorbar,
-                         colorbar_orientation=colorbar_orientation, title=None, opd_vmax=opd_vmax,
-                         nrows=nrows)
+            optic_display_helper(opd, ax2, 'OPD for '+self.name, True)
+
             ax2.set_ylabel('')  # suppress redundant label which duplicates the intensity plot's label
             if title is not None:
                 plt.suptitle(title)
-            return ax, ax2
-        elif what == 'amplitude':
-            plot_array = ampl
-            default_title = 'Transmissivity'
-            cb_label = 'Fraction'
-            cb_values = [0, 0.25, 0.5, 0.75, 1.0]
-            cmap = cmap_amp
-            norm = norm_amp
-        elif what == 'intensity':
-            plot_array = ampl ** 2
-            default_title = "Transmittance"
-            cb_label = 'Fraction'
-            cb_values = [0, 0.25, 0.5, 0.75, 1.0]
-            cmap = cmap_amp
-            norm = norm_amp
-        elif what == 'phase':
-            warnings.warn("displaying 'phase' has been deprecated. Use what='opd' instead.",
-                          category=DeprecationWarning)
-            plot_array = opd
-            default_title = "OPD"
-            cb_label = 'waves'
-            cb_values = np.array([-1, -0.5, 0, 0.5, 1]) * opd_vmax_m
-            cmap = cmap_opd
-            norm = norm_opd
-        elif what == 'opd':
-            plot_array = opd
-            default_title = "OPD"
-            cb_label = 'meters'
-            cb_values = np.array([-1, -0.5, 0, 0.5, 1]) * opd_vmax_m
-            cmap = cmap_opd
-            norm = norm_opd
+            return ax1, ax2
         else:
-            raise ValueError("Invalid value for 'what' parameter")
-
-        # now we plot whichever was chosen...
-        if ax is None:
-            if nrows > 1:
-                ax = plt.subplot(nrows, 2, row * 2 - 1)
+            if what == 'amplitude':
+                plot_array = ampl
+                default_title = 'Transmissivity'
+                is_opd = False
+            elif what == 'intensity':
+                plot_array = ampl ** 2
+                default_title = "Transmittance"
+                is_opd = False
+            elif what == 'opd':
+                plot_array = opd
+                default_title = "OPD"
+                is_opd = True
             else:
-                ax = plt.subplot(111)
-        utils.imshow_with_mouseover(plot_array, ax=ax, extent=extent, cmap=cmap, norm=norm,
-                                    origin='lower')
-        if nrows == 1:
-            if title is None:
-                title = default_title + " for " + self.name
-            plt.title(title)
-        plt.ylabel(units)
-        ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=4, integer=True))
-        ax.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=4, integer=True))
-        if colorbar:
-            cb = plt.colorbar(ax.images[0], orientation=colorbar_orientation, ticks=cb_values)
-            cb.set_label(cb_label)
-        if crosshairs:
-            ax.axhline(0, ls=":", color='k')
-            ax.axvline(0, ls=":", color='k')
+                raise ValueError("Invalid value for 'what' parameter. Must be one of {'amplitude', 'intensity', 'opd', 'both'}.")
 
-        if hasattr(self, 'display_annotate'):
-            self.display_annotate(self, ax)  # atypical calling convention needed empirically
-            # since Python doesn't seem to automatically pass
-            # self as first argument for functions added at
-            # run time as attributes?
-        return ax
+            # now we plot whichever was chosen...
+            if ax is None:
+                if nrows > 1:
+                    ax = plt.subplot(nrows, 2, row * 2 - 1)
+                else:
+                    ax = plt.subplot(1, 1, 1)
+            if nrows == 1:
+                if title is None:
+                    title = default_title + " for " + self.name
+
+            # do the actual plot! (for all cases except 'both')
+            optic_display_helper(plot_array, ax, title, is_opd)
+            return ax
 
     def __str__(self):
         if self.planetype == PlaneType.pupil:
@@ -2599,6 +2665,10 @@ class FITSOpticalElement(OpticalElement):
     and opd_index keyword parameters listed below, but the tuple interface is
     retained for back compatibility with existing code.
 
+    The FITS file header must provide information on the pixel scale, preferentially
+    via a PIXELSCL keyword, or else you must supply the pixel scale directly. See
+    more information just below in the parameter documentation for pixelscale.
+
 
     Parameters
     ----------
@@ -2638,7 +2708,9 @@ class FITSOpticalElement(OpticalElement):
         scipy.ndimage.interpolation.rotate function.
     pixelscale : optical str or float
         By default, poppy will attempt to determine the appropriate pixel scale
-        by examining the FITS header, checking keywords "PUPLSCAL" and 'PIXSCALE'
+        by examining the FITS header, checking keywords "PIXELSCL", "PUPLSCAL" and/or 'PIXSCALE'.
+        PIXELSCL is the default and should be preferred for new files; the latter two are
+        kept for back-compatibility with earlier format input files,
         for pupil and image planes respectively. If you would like to override
         and use a different keyword, provide that as a string here. Alternatively,
         you can just set a floating point value directly too (in meters/pixel

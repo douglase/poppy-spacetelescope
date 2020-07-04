@@ -10,9 +10,9 @@ import logging
 from . import utils
 from . import conf
 from . import accel_math
-from .version import version
 from .poppy_core import OpticalElement, Wavefront, BaseWavefront, PlaneType, _RADIANStoARCSEC
 from .accel_math import _exp, _r, _float, _complex
+from . import geometry
 
 if accel_math._USE_NUMEXPR:
     import numexpr as ne
@@ -25,7 +25,7 @@ __all__ = ['AnalyticOpticalElement', 'ScalarTransmission', 'InverseTransmission'
            'CircularOcculter', 'BarOcculter', 'FQPM_FFT_aligner', 'CircularAperture',
            'HexagonAperture', 'MultiHexagonAperture', 'NgonAperture', 'RectangleAperture',
            'SquareAperture', 'SecondaryObscuration', 'AsymmetricSecondaryObscuration',
-           'ThinLens', 'GaussianAperture', 'CompoundAnalyticOptic']
+           'ThinLens', 'GaussianAperture', 'KnifeEdge', 'CompoundAnalyticOptic', 'fixed_sampling_optic']
 
 
 # ------ Generic Analytic elements -----
@@ -58,12 +58,21 @@ class AnalyticOpticalElement(OpticalElement):
 
     """
 
-    def __init__(self, shift_x=None, shift_y=None, rotation=None, **kwargs):
+    def __init__(self, shift_x=None, shift_y=None, rotation=None,
+            inclination_x=None, inclination_y=None,
+            **kwargs):
         OpticalElement.__init__(self, **kwargs)
 
         if shift_x is not None: self.shift_x = shift_x
         if shift_y is not None: self.shift_y = shift_y
         if rotation is not None: self.rotation = rotation
+        if inclination_x is not None: self.inclination_x = inclination_x
+        if inclination_y is not None: self.inclination_y = inclination_y
+
+        if getattr(self, 'inclination_x', 0) != 0 and getattr(self, 'inclination_y', 0) != 0:
+            warnings.warn("It is physically inconsistent to set inclinations on both X and Y at the same time.")
+        if np.abs(getattr(self, 'inclination_x', 0)) > 90 or np.abs(getattr(self, 'inclination_y', 0)) > 90:
+            warnings.warn("Inclinations should be within the range -90 to 90 degrees")
 
         # self.shape = None  # no explicit shape required
         self.pixelscale = None
@@ -214,74 +223,6 @@ class AnalyticOpticalElement(OpticalElement):
             return output_array
 
     @utils.quantity_input(wavelength=u.meter)
-    def display(self, nrows=1, row=1, wavelength=1e-6 * u.meter, npix=512, grid_size=None,
-                what='intensity', **kwargs):
-        """Display an Analytic optic by first computing it onto a grid...
-
-        Parameters
-        ----------
-        wavelength : float
-            Wavelength to evaluate this optic's properties at
-        npix : int
-            Number of pixels to use when sampling the analytic optical element.
-        grid_size : float
-            Diameter of the grid on which to sample this optic in
-            meters (for pupil planes) or arcseconds (for image planes)
-        what : str
-            What to display: 'intensity', 'phase', 'opd', or 'both' which
-            shows intensity and phase.
-        ax : matplotlib.Axes instance
-            Axes to display into
-        nrows, row : integers
-            # of rows and row index for subplot display
-        crosshairs : bool
-            Display crosshairs indicating the center?
-        colorbar : bool
-            Show colorbar?
-        colorbar_orientation : bool
-            Desired orientation, horizontal or vertical?
-            Default is horizontal if only 1 row of plots, else vertical
-        opd_vmax : float
-            Max value for OPD image display, in meters.
-        title : string
-            Plot label
-        """
-
-        _log.debug("Displaying " + self.name + ", " + what)
-
-        # We need to sample the AnalyticOptic onto the desired sampling in order to display
-        # There is some complexity needed here because this function calls itself recursively
-        # to implement display='both' mode. We want to to be efficient and avoid unnecessary
-        # recomputations in that case, so we have to keep track of whether we're recursing or not.
-
-        if not hasattr(self, '_in_display') or self._in_display == False:
-            # temporarily set attributes appropriately as if this were a regular OpticalElement
-            _log.debug("Optic must be sampled to be displayed.")
-            amplitude, pixelscale = self.sample(wavelength=wavelength, npix=npix, what='amplitude',
-                                                grid_size=grid_size, return_scale=True)
-            self.amplitude = amplitude
-            self.pixelscale = pixelscale
-            opd, pixelscale = self.sample(wavelength=wavelength, npix=npix, what='opd',
-                                          grid_size=grid_size, return_scale=True)
-            self.opd = opd
-            self._in_display = True
-            need_to_unset = True
-        else:
-            need_to_unset = False
-
-        # then call parent class display
-        returnvalue = OpticalElement.display(self, nrows=nrows, row=row, what=what, **kwargs)
-
-        if need_to_unset:
-            # now un-set all the temporary attributes back, since this is analytic and
-            # these are now unneeded
-            self.pixelscale = None
-            self.opd = None
-            self.amplitude = None
-            self._in_display = False
-        return returnvalue
-
-    @utils.quantity_input(wavelength=u.meter)
     def to_fits(self, outname=None, what='amplitude', wavelength=1e-6 * u.meter, npix=512, **kwargs):
         """ Save an analytic optic computed onto a grid to a FITS file
 
@@ -302,6 +243,10 @@ class AnalyticOpticalElement(OpticalElement):
         See the sample() function for additional optional parameters.
 
         """
+        try:
+            from .version import version
+        except ImportError:
+            version = ''
 
         kwargs['return_scale'] = True
 
@@ -352,11 +297,14 @@ class AnalyticOpticalElement(OpticalElement):
 
         Method: Calls the supplied wave object's coordinates() method,
         then checks for the existence of the following attributes:
-        "shift_x", "shift_y", "rotation"
+        "shift_x", "shift_y", "rotation", "inclination_x", "inclination_y"
         If any of them are present, then the coordinates are modified accordingly.
 
         Shifts are given in meters for pupil optics and arcseconds for image
-        optics.
+        optics. Rotations and inclinations are given in degrees.
+
+        For multiple transformations, the order of operations is:
+            shift, rotate, incline.
         """
 
         y, x = wave.coordinates()
@@ -368,9 +316,13 @@ class AnalyticOpticalElement(OpticalElement):
             angle = np.deg2rad(self.rotation)
             xp = np.cos(angle) * x + np.sin(angle) * y
             yp = -np.sin(angle) * x + np.cos(angle) * y
-
             x = xp
             y = yp
+        # inclination around X axis rescales Y, and vice versa:
+        if hasattr(self, "inclination_x"):
+            y /= np.cos(np.deg2rad(self.inclination_x))
+        if hasattr(self, "inclination_y"):
+            x /= np.cos(np.deg2rad(self.inclination_y))
 
         return y, x
 
@@ -745,10 +697,6 @@ class RectangularFieldStop(AnalyticImagePlaneElement):
                              "to define the spacing")
         assert (wave.planetype == PlaneType.image)
 
-        #        y, x = wave.coordinates()
-        #        xnew = x * np.cos(np.deg2rad(self.angle)) + y * np.sin(np.deg2rad(self.angle))
-        #        ynew = -x * np.sin(np.deg2rad(self.angle)) + y * np.cos(np.deg2rad(self.angle))
-        #        x, y = xnew, ynew
         y, x = self.get_coordinates(wave)
 
         w_outside = np.where(
@@ -895,15 +843,20 @@ class AnnularFieldStop(AnalyticImagePlaneElement):
         y, x = self.get_coordinates(wave)
         r = _r(x, y)
 
-        self.transmission = np.ones(wave.shape, dtype=_float())
-
         radius_inner = self.radius_inner.to(u.arcsec).value
         radius_outer = self.radius_outer.to(u.arcsec).value
 
-        if radius_inner > 0:
-            self.transmission[r <= radius_inner] = 0
+        pxscl = wave.pixelscale.to(u.arcsec/u.pixel).value
+        ypix=y/pxscl  # The filled_circle_aa code and in particular pxwt doesn't seem reliable with pixel scale <1
+        xpix=x/pxscl
+
         if self.radius_outer > 0:
-            self.transmission[r >= radius_outer] = 0
+            self.transmission = geometry.filled_circle_aa(wave.shape, 0,0, radius_outer/pxscl, xarray=xpix, yarray=ypix)
+        else:
+            self.transmission = np.ones(wave.shape, dtype=_float())
+
+        if self.radius_inner > 0:
+            self.transmission -= geometry.filled_circle_aa(wave.shape, 0,0, radius_inner/pxscl, xarray=xpix, yarray=ypix)
 
         return self.transmission
 
@@ -1088,24 +1041,31 @@ class CircularAperture(AnalyticOpticalElement):
         Descriptive name
     radius : float
         Radius of the pupil, in meters. Default is 1.0
-
+    gray_pixel : bool
+        Apply gray pixel approximation to return fractional transmission for
+        edge pixels that are only partially within this aperture?
     pad_factor : float, optional
         Amount to oversize the wavefront array relative to this pupil.
         This is in practice not very useful, but it provides a straightforward way
         of verifying during code testing that the amount of padding (or size of the circle)
         does not make any numerical difference in the final result.
+
     """
 
     @utils.quantity_input(radius=u.meter)
-    def __init__(self, name=None, radius=1.0 * u.meter, pad_factor=1.0, planetype=PlaneType.unspecified, **kwargs):
+    def __init__(self, name=None, radius=1.0 * u.meter, pad_factor=1.0, planetype=PlaneType.unspecified,
+            gray_pixel=True, **kwargs):
 
         if name is None:
             name = "Circle, radius={}".format(radius)
         super(CircularAperture, self).__init__(name=name, planetype=planetype, **kwargs)
+        if radius <= 0*u.meter:
+            raise ValueError("radius must be a positive nonzero number.")
         self.radius = radius
         # for creating input wavefronts - let's pad a bit:
         self.pupil_diam = pad_factor * 2 * self.radius
         self._default_display_size = 3 * self.radius
+        self._use_gray_pixel = bool(gray_pixel)
 
     def get_transmission(self, wave):
         """ Compute the transmission inside/outside of the aperture.
@@ -1117,14 +1077,18 @@ class CircularAperture(AnalyticOpticalElement):
 
         y, x = self.get_coordinates(wave)
         radius = self.radius.to(u.meter).value
-        r = _r(x, y)
-        del x
-        del y
+        if self._use_gray_pixel:
+            pixscale = wave.pixelscale.to(u.meter/u.pixel).value
+            self.transmission = geometry.filled_circle_aa(wave.shape, 0, 0, radius/pixscale, x/pixscale, y/pixscale)
+        else:
+            r = _r(x, y)
+            del x
+            del y
 
-        w_outside = np.where(r > radius)
-        del r
-        self.transmission = np.ones(wave.shape, dtype=_float())
-        self.transmission[w_outside] = 0
+            w_outside = np.where(r > radius)
+            del r
+            self.transmission = np.ones(wave.shape, dtype=_float())
+            self.transmission[w_outside] = 0
         return self.transmission
 
 
@@ -1704,16 +1668,22 @@ class ThinLens(CircularAperture):
         r = np.sqrt(x ** 2 + y ** 2)
         r_norm = r / self.radius.to(u.meter).value
 
-        # the thin lens is explicitly also a circular aperture:
-        aperture_intensity = CircularAperture.get_transmission(self, wave)
-        # we use the aperture instensity here to mask the OPD we return
 
         # don't forget the factor of 0.5 to make the scaling factor apply as peak-to-valley
         # rather than center-to-peak
         defocus_zernike = ((2 * r_norm ** 2 - 1) *
                            (0.5 * self.nwaves * self.reference_wavelength.to(u.meter).value))
+
         # add negative sign here to get desired sign convention
-        opd = -defocus_zernike * aperture_intensity
+        opd = -defocus_zernike
+
+        # the thin lens is explicitly also a circular aperture:
+        # we use the aperture instensity here to mask the OPD we return, in
+        # order to avoid bogus values outside the aperture
+        aperture_intensity = CircularAperture.get_transmission(self, wave)
+        opd[aperture_intensity==0] = 0
+
+
         return opd
 
 
@@ -1913,7 +1883,7 @@ class CompoundAnalyticOptic(AnalyticOpticalElement):
 
 # ------ convert analytic optics to array optics ------
 
-def fixed_sampling_optic(optic, wavefront):
+def fixed_sampling_optic(optic, wavefront, oversample=2):
     """Convert a variable-sampling AnalyticOpticalElement to a fixed-sampling ArrayOpticalElement
 
     For a given input optic this produces an equivalent output optic stored in simple arrays rather
@@ -1925,12 +1895,20 @@ def fixed_sampling_optic(optic, wavefront):
     you can save time by setting the sampling to a fixed value and saving arrays
     computed on that sampling.
 
+    Also, you can use this to evaluate any optic on a finer sampling scale and then bin the
+    results to the desired scale, using the so-called gray-pixel approximation. (i.e. the
+    value for each output pixel is computed as the average of N*N finer pixels in an
+    intermediate array.)
+
     Parameters
     ----------
     optic : poppy.AnalyticOpticalElement
         Some optical element
     wave : poppy.Wavefront
         A wavefront to define the desired sampling pixel size and number.
+    oversample : int
+        Subpixel sampling factor for "gray pixel" approximation: the optic will be
+        evaluated on a finer pixel scale and then binned down to the desired sampling.
 
     Returns
     -------
@@ -1941,8 +1919,20 @@ def fixed_sampling_optic(optic, wavefront):
     from .poppy_core import ArrayOpticalElement
     npix = wavefront.shape[0]
     grid_size = npix*u.pixel*wavefront.pixelscale
-    sampled_opd = optic.sample(what='opd', npix=npix, grid_size=grid_size)
-    sampled_trans = optic.sample(what='amplitude', npix=npix, grid_size=grid_size)
+    _log.debug("Converting {} to fixed sampling with grid_size={}, npix={}, oversample={}".format(
+        optic.name, grid_size, npix, oversample))
+
+    if oversample>1:
+        _log.debug("retrieving oversampled opd and transmission arrays")
+        sampled_opd = optic.sample(what='opd', npix=npix*oversample, grid_size=grid_size)
+        sampled_trans = optic.sample(what='amplitude', npix=npix*oversample, grid_size=grid_size)
+
+        _log.debug("binning down opd and transmission arrays")
+        sampled_opd = utils.krebin(sampled_opd, wavefront.shape)/oversample**2
+        sampled_trans = utils.krebin(sampled_trans, wavefront.shape)/oversample**2
+    else:
+        sampled_opd = optic.sample(what='opd', npix=npix, grid_size=grid_size)
+        sampled_trans = optic.sample(what='amplitude', npix=npix, grid_size=grid_size)
 
     return ArrayOpticalElement(opd=sampled_opd,
                                transmission=sampled_trans,
